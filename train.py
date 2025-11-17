@@ -45,6 +45,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
 
+    print("\n" + "="*80)
+    print("STAGE 2: SEMANTIC FEATURE OPTIMIZATION")
+    print("="*80)
+    print("This training stage only optimizes semantic features.")
+    print("All geometry and appearance parameters are frozen.")
+    print("Make sure to load a pretrained checkpoint from Stage 1 using --start_checkpoint")
+    print("="*80 + "\n")
+
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
@@ -53,6 +61,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
+        print(f"Loaded checkpoint from iteration {first_iter}")
+    else:
+        print("WARNING: No checkpoint provided! Starting from scratch.")
+        print("For Stage 2, you should load a Stage 1 checkpoint using --start_checkpoint")
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
