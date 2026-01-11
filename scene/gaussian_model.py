@@ -64,6 +64,7 @@ class GaussianModel:
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
+        self.joint_optimization = False
         self.setup_functions()
 
     def capture(self):
@@ -83,7 +84,7 @@ class GaussianModel:
             self.spatial_lr_scale,
         )
     
-    def restore(self, model_args, training_args):
+    def restore(self, model_args, training_args, joint_optimization=False):
         (self.active_sh_degree, 
         self._xyz, 
         self._features_dc, 
@@ -97,10 +98,15 @@ class GaussianModel:
         denom,
         opt_dict, 
         self.spatial_lr_scale) = model_args
-        self.training_setup(training_args)
+        self.training_setup(training_args, joint_optimization=joint_optimization)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
-        self.optimizer.load_state_dict(opt_dict)
+        # Only load optimizer state if not switching optimization modes
+        if not joint_optimization:
+            try:
+                self.optimizer.load_state_dict(opt_dict)
+            except:
+                print("Could not load optimizer state, initializing fresh optimizer.")
 
     @property
     def get_scaling(self):
@@ -186,21 +192,43 @@ class GaussianModel:
         exposure = torch.eye(3, 4, device="cuda")[None].repeat(len(cam_infos), 1, 1)
         self._exposure = nn.Parameter(exposure.requires_grad_(True))
 
-    def training_setup(self, training_args):
+    def training_setup(self, training_args, joint_optimization=False):
+        """
+        Setup training parameters and optimizer.
+        
+        Args:
+            training_args: Training configuration
+            joint_optimization: If True, optimize all parameters jointly (geometry + semantics)
+                              If False (default), freeze geometry and only optimize semantics (Stage 2)
+        """
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.joint_optimization = joint_optimization
 
-        # Stage 2: Freeze geometry/appearance, optimize only semantics
-        l = [
-            {'params': [self._xyz], 'lr': 0.0, "name": "xyz"},
-            {'params': [self._features_dc], 'lr': 0.0, "name": "f_dc"},
-            {'params': [self._features_rest], 'lr': 0.0, "name": "f_rest"},
-            {'params': [self._opacity], 'lr': 0.0, "name": "opacity"},
-            {'params': [self._scaling], 'lr': 0.0, "name": "scaling"},
-            {'params': [self._rotation], 'lr': 0.0, "name": "rotation"},
-            {'params': [self._semantic_features], 'lr': training_args.semantic_lr, "name": "semantic_features"}
-        ]
+        if joint_optimization:
+            # JOINT OPTIMIZATION: Optimize all parameters together
+            # This allows semantic loss to affect geometry through gradient flow
+            l = [
+                {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
+                {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
+                {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
+                {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
+                {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
+                {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
+                {'params': [self._semantic_features], 'lr': training_args.semantic_lr, "name": "semantic_features"}
+            ]
+        else:
+            # Stage 2: Freeze geometry/appearance, optimize only semantics
+            l = [
+                {'params': [self._xyz], 'lr': 0.0, "name": "xyz"},
+                {'params': [self._features_dc], 'lr': 0.0, "name": "f_dc"},
+                {'params': [self._features_rest], 'lr': 0.0, "name": "f_rest"},
+                {'params': [self._opacity], 'lr': 0.0, "name": "opacity"},
+                {'params': [self._scaling], 'lr': 0.0, "name": "scaling"},
+                {'params': [self._rotation], 'lr': 0.0, "name": "rotation"},
+                {'params': [self._semantic_features], 'lr': training_args.semantic_lr, "name": "semantic_features"}
+            ]
 
         if self.optimizer_type == "default":
             self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -224,12 +252,19 @@ class GaussianModel:
                                                         max_steps=training_args.iterations)
     
     def update_learning_rate(self, iteration):
-        '''Learning rate scheduling per step - Stage 2: Only semantics are optimized'''
+        '''Learning rate scheduling per step'''
         if self.pretrained_exposures is None:
             for param_group in self.exposure_optimizer.param_groups:
                 param_group['lr'] = self.exposure_scheduler_args(iteration)
 
-        # All geometry/appearance params remain frozen (LR=0)
+        if self.joint_optimization:
+            # Joint optimization: Update xyz learning rate with schedule
+            for param_group in self.optimizer.param_groups:
+                if param_group["name"] == "xyz":
+                    lr = self.xyz_scheduler_args(iteration)
+                    param_group['lr'] = lr
+                    return lr
+        # Stage 2: All geometry/appearance params remain frozen (LR=0)
         # Semantic features maintain their learning rate
 
     def construct_list_of_attributes(self):
