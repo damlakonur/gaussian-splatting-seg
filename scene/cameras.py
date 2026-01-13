@@ -89,7 +89,7 @@ class Camera(nn.Module):
         self.camera_center = self.world_view_transform.inverse()[3, :3]
         
 class MiniCam:
-    def __init__(self, width, height, fovy, fovx, znear, zfar, world_view_transform, full_proj_transform):
+    def __init__(self, width, height, fovy, fovx, znear, zfar, world_view_transform, full_proj_transform, image_name=None):
         self.image_width = width
         self.image_height = height    
         self.FoVy = fovy
@@ -100,4 +100,5 @@ class MiniCam:
         self.full_proj_transform = full_proj_transform
         view_inv = torch.inverse(self.world_view_transform)
         self.camera_center = view_inv[3][:3]
+        self.image_name = image_name
 

@@ -47,7 +47,7 @@ class GaussianModel:
         self.rotation_activation = torch.nn.functional.normalize
 
 
-    def __init__(self, sh_degree, optimizer_type="default"):
+    def __init__(self, sh_degree, optimizer_type="default", num_semantic_channels=21):
         self.active_sh_degree = 0
         self.optimizer_type = optimizer_type
         self.max_sh_degree = sh_degree  
@@ -66,6 +66,7 @@ class GaussianModel:
         self.spatial_lr_scale = 0
         self.joint_optimization = False
         self.setup_functions()
+        self.num_semantic_channels = num_semantic_channels
 
     def capture(self):
         return (
@@ -177,7 +178,7 @@ class GaussianModel:
         opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
         # Initialize semantic features with small random values (10 classes)
-        semantic_features = torch.randn((fused_point_cloud.shape[0], 10), dtype=torch.float, device="cuda") * 0.01
+        semantic_features = torch.randn((fused_point_cloud.shape[0], self.num_semantic_channels), dtype=torch.float, device="cuda") * 0.01
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
@@ -361,7 +362,7 @@ class GaussianModel:
                 semantics[:, idx] = np.asarray(plydata.elements[0][attr_name])
         else:
             # Initialize with random values if not present (for backward compatibility)
-            semantics = np.random.randn(xyz.shape[0], 10) * 0.01
+            semantics = np.random.randn(xyz.shape[0], self.num_semantic_channels) * 0.01
 
         self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))
         self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))

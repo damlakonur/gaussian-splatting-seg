@@ -56,6 +56,12 @@ class ModelParams(ParamGroup):
         self.train_test_exp = False
         self.data_device = "cuda"
         self.eval = False
+        # ScanNet++ specific parameters
+        self.scannetpp_scene_id = ""
+        self.scannetpp_max_images = -1
+        self.scannetpp_image_subdir = ""
+        self.scannetpp_mask_subdir = ""
+        self.scannetpp_transform_file = ""
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
