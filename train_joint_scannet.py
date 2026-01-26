@@ -237,6 +237,8 @@ def load_segmentation_mask(seg_masks_dir: str, image_name: str, scene_id: str = 
     if not seg_masks_path.exists():
         return None
     
+    base_name = os.path.splitext(image_name)[0]
+    
     # Build search paths based on provided structure
     search_paths = []
     
@@ -244,17 +246,18 @@ def load_segmentation_mask(seg_masks_dir: str, image_name: str, scene_id: str = 
     if seg_subdir:
         base = seg_masks_path / seg_subdir
         search_paths.extend([
-            base / f"{image_name}.png",
+            base / f"{base_name}.png",
             base / f"{image_name}.jpg",
             base / image_name,  # Already has extension like DSC04151.JPG.png
+            base / f"{base_name}_seg.npy"
         ])
     
     # Priority 2: Full nested structure: seg_masks_dir/scene_id/seg_subdir/filename
     if scene_id and seg_subdir:
         base = seg_masks_path / scene_id / seg_subdir
         search_paths.extend([
+            base / f"{base_name}.png",
             base / f"{image_name}.png",
-            base / f"{image_name}.jpg",
             base / image_name,
         ])
     
@@ -262,13 +265,12 @@ def load_segmentation_mask(seg_masks_dir: str, image_name: str, scene_id: str = 
     if scene_id:
         base = seg_masks_path / scene_id
         search_paths.extend([
+            base / f"{base_name}.png",
             base / f"{image_name}.png",
-            base / f"{image_name}.jpg",
             base / image_name,
         ])
     
     # Priority 4: Flat structure: seg_masks_dir/filename
-    base_name = os.path.splitext(image_name)[0]  # Remove extension like .JPG
     search_paths.extend([
         seg_masks_path / f"{image_name}.png",  # DSC04151.JPG.png
         seg_masks_path / f"{base_name}.png",   # DSC04151.png
@@ -441,6 +443,9 @@ def training(
     colored_masks_subdir: str = None,
     semantic_remap_path: str = None,
     num_semantic_channels: int = 21,
+    entropy_weight: float = 0.0, 
+    entropy_warmup_iters: int = 0, 
+    semantic_softmax: bool = False
 ):
     """
     Joint optimization training for ScanNet++ dataset.
@@ -607,20 +612,63 @@ def training(
                 num_classes = semantic_map.shape[0]
                 gt_semantic = gt_semantic.clamp(0, num_classes - 1)
                 
-                # Cross-entropy loss
-                semantic_loss = F.cross_entropy(
-                    semantic_map_clean.unsqueeze(0),  # [1, C, H, W]
-                    gt_semantic.unsqueeze(0)          # [1, H, W]
-                )
+                # Modified Softmax logic
+                if semantic_softmax:
+                    # Log-Softmax + NLL Loss (Explicit Softmax)
+                    log_probs = F.log_softmax(semantic_map_clean.unsqueeze(0), dim=1)
+                    semantic_loss = F.nll_loss(log_probs, gt_semantic.unsqueeze(0))
+                else:
+                    # Standard Cross Entropy (Implicit Softmax)
+                    semantic_loss = F.cross_entropy(
+                        semantic_map_clean.unsqueeze(0), 
+                        gt_semantic.unsqueeze(0)
+                    )
                 
                 del gt_semantic, semantic_map_clean
         
         # If no semantic loss computed, detach semantic_map
         if not has_semantic_loss:
             semantic_map = semantic_map.detach()
+        
+        # Gaussian entropy regularization on per-Gaussian semantic logits
+        entropy_loss = 0.0
+        entropy_stats = None  # (mean, median, p10, p90) for logging
+
+        # Always compute entropy stats if semantic features exist
+        gaussian_logits = getattr(gaussians, "_semantic_features", None)
+        if gaussian_logits is not None:
+            # gaussian_logits: [N, C]
+            probs = torch.softmax(gaussian_logits, dim=-1)
+            eps = 1e-8
+            entropy_per_gauss = -torch.sum(probs * torch.log(probs + eps), dim=-1)  # [N]
+
+            # Stats over Gaussians
+            entropy_mean = entropy_per_gauss.mean()
+            entropy_median = entropy_per_gauss.median()
+            p10 = torch.quantile(entropy_per_gauss, 0.10)
+            p90 = torch.quantile(entropy_per_gauss, 0.90)
+            
+            # Save for logging
+            entropy_stats = (
+                entropy_mean.detach(),
+                entropy_median.detach(),
+                p10.detach(),
+                p90.detach(),
+            )
+
+            # Only add entropy to loss when entropy_weight > 0
+            if entropy_weight > 0.0:
+                if entropy_warmup_iters > 0:
+                    w_factor = min(1.0, float(iteration) / float(entropy_warmup_iters))
+                else:
+                    w_factor = 1.0
+                curr_entropy_weight = entropy_weight * w_factor
+                entropy_loss = curr_entropy_weight * entropy_mean
+        else:
+            entropy_loss = 0.0
 
         # Combined loss for joint optimization
-        loss = rgb_loss + semantic_weight * semantic_loss
+        loss = rgb_loss + semantic_weight * semantic_loss + entropy_loss
         
         del depth_image
         loss.backward()
@@ -666,6 +714,15 @@ def training(
                 writer.add_scalar("Train/Total_Loss", train_metrics["total_loss"], iteration)
                 writer.add_scalar("Train/L1_Loss", train_metrics["l1_loss"], iteration)
                 writer.add_scalar("Train/Num_GS", gaussians.get_xyz.shape[0], iteration)
+                writer.add_scalar("Train/Entropy_Loss", entropy_loss.item() if torch.is_tensor(entropy_loss) else entropy_loss, iteration)
+
+                # Log Entropy Stats
+                if entropy_stats is not None:
+                    writer.add_scalar("Entropy/Mean", entropy_stats[0].item(), iteration)
+                    writer.add_scalar("Entropy/Median", entropy_stats[1].item(), iteration)
+                    writer.add_scalar("Entropy/P10", entropy_stats[2].item(), iteration)
+                    writer.add_scalar("Entropy/P90", entropy_stats[3].item(), iteration)
+
                 train_meter.reset()
 
             if iteration == opt_params.iterations:
@@ -963,6 +1020,14 @@ if __name__ == "__main__":
     parser.add_argument("--num_semantic_channels", type=int, default=21,
                        help="Number of semantic channels for semantic features")
 
+    # Entropy and softmax arguments
+    parser.add_argument("--entropy_weight", type=float, default=0.0,
+                        help="Weight for Gaussian semantic entropy regularizer")
+    parser.add_argument("--entropy_warmup_iters", type=int, default=0,
+                        help="Iterations to linearly warm up entropy weight from 0")
+    parser.add_argument("--semantic_softmax", action="store_true",
+                        help="Apply LogSoftmax+NLL instead of CrossEntropy")
+    
     args = parser.parse_args()
     args.save_iterations.append(args.iterations)
 
@@ -991,5 +1056,8 @@ if __name__ == "__main__":
         args.colored_masks_subdir,
         args.semantic_remap_path,
         args.num_semantic_channels,
+        args.entropy_weight,
+        args.entropy_warmup_iters,
+        args.semantic_softmax
     )
 
