@@ -1,16 +1,19 @@
 #!/bin/bash
 
 export CUDA_VISIBLE_DEVICES=0
-SCENE_ID="f36e3e1e53"
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
+SCENE_ID="7831862f02"
 NUM_ITERATIONS=30000
-NUM_SEMANTIC_CHANNELS=21
-SEG_MASKS_DIR="/home/dkonur/scannetpp/semantic_2d_output/${SCENE_ID}"
+NUM_SEMANTIC_CHANNELS=14
+# SEG_MASKS_DIR="/home/dkonur/scannetpp/semantic_output_oneformer_remapped/"
+SEG_MASKS_DIR="/home/dkonur/scannetpp/semantic_2d_output_100/"
 SEG_MASKS_SUBDIR="${SCENE_ID}_4x"
 COLORED_MASKS_SUBDIR="${SCENE_ID}_4x"  # Same directory as seg masks, colored ones have _viz.png suffix
-OUTPUT_ROOT="./output/scannetpp_joint_${SCENE_ID}_${NUM_ITERATIONS}k_${NUM_SEMANTIC_CHANNELS}classes"
+OUTPUT_ROOT="./output/scannetpp_joint_onerformer_${SCENE_ID}_${NUM_ITERATIONS}k_${NUM_SEMANTIC_CHANNELS}classes_original"
 DATA_ROOT="/home/dkonur/scannetpp/data"
-PALETTE_PATH="/home/dkonur/scannetpp/metadata/semantic_palette.txt"
-SEMANTIC_REMAP_PATH="/home/dkonur/scannetpp/metadata/class_remap_${SCENE_ID}.json"
+PALETTE_PATH="/home/dkonur/scannetpp/metadata/semantic_palette_100.txt"
+# SEMANTIC_REMAP_PATH="/home/dkonur/scannetpp/metadata/class_remap_${SCENE_ID}_100_oneformer_remapped.json"
+SEMANTIC_REMAP_PATH="/home/dkonur/scannetpp/metadata/class_remap_${SCENE_ID}_100.json"
 
 IMAGE_SUBDIR="resized_undistorted_images_4x"
 MASK_SUBDIR="resized_undistorted_masks_4x"

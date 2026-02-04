@@ -8,6 +8,7 @@ After modifying any CUDA files in `submodules/diff-gaussian-rasterization/`, you
 cd gaussian-splatting-seg/submodules/diff-gaussian-rasterization
 rm -rf build
 python setup.py build_ext --inplace
+pip install -e .
 ```
 
 ## Testing Semantic Features

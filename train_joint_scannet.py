@@ -170,9 +170,9 @@ def colorize_semantic_map(labels: np.ndarray, palette_path: str = None, local_to
         labels_global = local_to_global_arr[labels_clipped]
     else:
         labels_global = labels
-    
-    labels_clipped = np.clip(labels_global, 0, num_colors - 1)
-    colored = colormap[labels_clipped]
+    # color = semantic_palette[sem_id % len(semantic_palette)]
+    labels_global = labels_global % num_colors
+    colored = colormap[labels_global]
     return colored
 
 
@@ -237,42 +237,39 @@ def load_segmentation_mask(seg_masks_dir: str, image_name: str, scene_id: str = 
     if not seg_masks_path.exists():
         return None
     
-    base_name = os.path.splitext(image_name)[0]
-    
     # Build search paths based on provided structure
     search_paths = []
-    
     # Priority 1: seg_masks_dir/seg_subdir/filename (if seg_masks_dir already has scene_id)
     if seg_subdir:
-        base = seg_masks_path / seg_subdir
+        base = seg_masks_path  / seg_subdir
         search_paths.extend([
-            base / f"{base_name}.png",
+            base / f"{image_name}.png",
             base / f"{image_name}.jpg",
             base / image_name,  # Already has extension like DSC04151.JPG.png
-            base / f"{base_name}_seg.npy"
         ])
     
     # Priority 2: Full nested structure: seg_masks_dir/scene_id/seg_subdir/filename
     if scene_id and seg_subdir:
         base = seg_masks_path / scene_id / seg_subdir
         search_paths.extend([
-            base / f"{base_name}.png",
             base / f"{image_name}.png",
+            base / f"{image_name}.jpg",
             base / image_name,
         ])
     
     # Priority 3: Partial structure: seg_masks_dir/scene_id/filename
     if scene_id:
-        base = seg_masks_path / scene_id
+        base = seg_masks_path / scene_id / seg_subdir
         search_paths.extend([
-            base / f"{base_name}.png",
             base / f"{image_name}.png",
+            base / f"{image_name}.jpg",
             base / image_name,
         ])
     
     # Priority 4: Flat structure: seg_masks_dir/filename
+    base_name = os.path.splitext(image_name)[0]  # Remove extension like .JPG
     search_paths.extend([
-        seg_masks_path / f"{image_name}.png",  # DSC04151.JPG.png
+        seg_masks_path  / seg_subdir / f"{base_name}.png",  # DSC04151.JPG.png
         seg_masks_path / f"{base_name}.png",   # DSC04151.png
         seg_masks_path / f"{base_name}_seg.npy",
         seg_masks_path / f"{base_name}.npy",

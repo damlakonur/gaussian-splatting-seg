@@ -22,7 +22,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from torch.utils.checkpoint import checkpoint
+# checkpoint import removed - using efficient flattened loss instead
 
 from arguments import ModelParams, PipelineParams, OptimizationParams
 from scene import Scene, GaussianModel
@@ -171,9 +171,9 @@ def colorize_semantic_map(labels: np.ndarray, palette_path: str = None, local_to
         labels_global = local_to_global_arr[labels_clipped]
     else:
         labels_global = labels
-    
-    labels_clipped = np.clip(labels_global, 0, num_colors - 1)
-    colored = colormap[labels_clipped]
+    # color = semantic_palette[sem_id % len(semantic_palette)]
+    labels_global = labels_global % num_colors
+    colored = colormap[labels_global]
     return colored
 
 
@@ -238,42 +238,40 @@ def load_segmentation_mask(seg_masks_dir: str, image_name: str, scene_id: str = 
     if not seg_masks_path.exists():
         return None
     
-    base_name = os.path.splitext(image_name)[0]
-    
     # Build search paths based on provided structure
     search_paths = []
     
     # Priority 1: seg_masks_dir/seg_subdir/filename (if seg_masks_dir already has scene_id)
     if seg_subdir:
-        base = seg_masks_path / seg_subdir
+        base = seg_masks_path  / seg_subdir
         search_paths.extend([
-            base / f"{base_name}.png",
+            base / f"{image_name}.png",
             base / f"{image_name}.jpg",
             base / image_name,  # Already has extension like DSC04151.JPG.png
-            base / f"{base_name}_seg.npy"
         ])
     
     # Priority 2: Full nested structure: seg_masks_dir/scene_id/seg_subdir/filename
     if scene_id and seg_subdir:
         base = seg_masks_path / scene_id / seg_subdir
         search_paths.extend([
-            base / f"{base_name}.png",
             base / f"{image_name}.png",
+            base / f"{image_name}.jpg",
             base / image_name,
         ])
     
     # Priority 3: Partial structure: seg_masks_dir/scene_id/filename
     if scene_id:
-        base = seg_masks_path / scene_id
+        base = seg_masks_path / scene_id / seg_subdir
         search_paths.extend([
-            base / f"{base_name}.png",
             base / f"{image_name}.png",
+            base / f"{image_name}.jpg",
             base / image_name,
         ])
     
     # Priority 4: Flat structure: seg_masks_dir/filename
+    base_name = os.path.splitext(image_name)[0]  # Remove extension like .JPG
     search_paths.extend([
-        seg_masks_path / f"{image_name}.png",  # DSC04151.JPG.png
+        seg_masks_path  / seg_subdir / f"{base_name}.png",  # DSC04151.JPG.png
         seg_masks_path / f"{base_name}.png",   # DSC04151.png
         seg_masks_path / f"{base_name}_seg.npy",
         seg_masks_path / f"{base_name}.npy",
@@ -422,21 +420,28 @@ def data_to_camera(data: Dict[str, torch.Tensor]) -> MiniCam:
         image_name=data["image_name"],
     )
 
-def compute_checkpointed_semantic_loss(semantic_map_clean, gt_semantic, semantic_softmax):
+def compute_semantic_loss_efficient(semantic_map_clean, gt_semantic, semantic_softmax):
     """
-    Helper function for gradient checkpointing. 
-    Wraps the softmax/loss calculation to save VRAM.
+    Efficient semantic loss without gradient checkpointing.
+    Uses flattened tensors to avoid batch dimension overhead and unnecessary copies.
+    
+    Memory savings vs naive approach:
+    - No unsqueeze copies (avoids [1, C, H, W] intermediate)
+    - Direct flattened cross_entropy is more cache-friendly
     """
+    C, H, W = semantic_map_clean.shape
+    # Flatten: [C, H, W] -> [H*W, C] - cross_entropy expects [N, C] input
+    # Using reshape + contiguous is faster than permute for this pattern
+    logits_flat = semantic_map_clean.view(C, -1).t().contiguous()  # [H*W, C]
+    target_flat = gt_semantic.view(-1)  # [H*W]
+    
     if semantic_softmax:
         # Log-Softmax + NLL Loss (Explicit Softmax)
-        log_probs = F.log_softmax(semantic_map_clean.unsqueeze(0), dim=1)
-        return F.nll_loss(log_probs, gt_semantic.unsqueeze(0))
+        log_probs = F.log_softmax(logits_flat, dim=1)
+        return F.nll_loss(log_probs, target_flat)
     else:
-        # Standard Cross Entropy (Implicit Softmax)
-        return F.cross_entropy(
-            semantic_map_clean.unsqueeze(0), 
-            gt_semantic.unsqueeze(0)
-        )
+        # Standard Cross Entropy (Implicit Softmax) - most efficient path
+        return F.cross_entropy(logits_flat, target_flat)
 
 def training(
     data_root: str,
@@ -628,14 +633,11 @@ def training(
                 num_classes = semantic_map.shape[0]
                 gt_semantic = gt_semantic.clamp(0, num_classes - 1)
                 
-                # Use gradient checkpointing to save VRAM on the heavy softmax/loss pass
-                # This re-calculates the forward pass during backprop to avoid storing intermediate tensors
-                semantic_loss = checkpoint(
-                    compute_checkpointed_semantic_loss, 
+                # Efficient flattened cross-entropy - avoids checkpoint overhead while minimizing memory
+                semantic_loss = compute_semantic_loss_efficient(
                     semantic_map_clean, 
                     gt_semantic, 
-                    semantic_softmax,
-                    use_reentrant=False
+                    semantic_softmax
                 )
                 
                 del gt_semantic, semantic_map_clean
